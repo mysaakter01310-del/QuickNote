@@ -10,7 +10,9 @@
         android:layout_height="wrap_content"
         android:orientation="vertical">
 
-        <include layout="@layout/toolbar_main" />
+        <include 
+            android:id="@+id/toolbar"
+        layout="@layout/toolbar_main" />
 
         <LinearLayout
             android:id="@+id/searchBar"

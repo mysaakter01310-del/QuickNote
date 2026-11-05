@@ -6,7 +6,9 @@
     android:background="@color/background"
     android:orientation="vertical">
 
-    <include layout="@layout/toolbar_editor" />
+    <include
+        android:id="@+id/editorToolbar"
+    layout="@layout/toolbar_editor" />
 
     <EditText
         android:id="@+id/editTitle"
