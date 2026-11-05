@@ -33,8 +33,8 @@ class NoteEditorActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityNoteEditorBinding.inflate(layoutInflater)
         setContentView(binding.root)
-        setSupportActionBar(binding.editorToolbar)
-        binding.editorToolbar.setNavigationOnClickListener { saveAndFinish() }
+        setSupportActionBar(binding.editorToolbar.root)
+        binding.editorToolbar.root.setNavigationOnClickListener { saveAndFinish() }
 
         repo = VaultRepository(this)
         noteUri = Uri.parse(intent.getStringExtra("noteUri"))
