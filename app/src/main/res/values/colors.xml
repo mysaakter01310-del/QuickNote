@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="clipper_blue">#1E88E5</color>
+    <color name="clipper_blue_dark">#1565C0</color>
+    <color name="background">#FFFFFF</color>
+    <color name="card_bg">#FFFFFF</color>
+    <color name="divider">#E0E0E0</color>
+    <color name="text_primary">#212121</color>
+    <color name="text_secondary">#757575</color>
+    <color name="pin_red">#E53935</color>
+    <color name="fab_bg">#1E88E5</color>
+</resources>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">QuickNote</string>
+    <string name="quick_add_title">Quick Add</string>
+    <string name="add_image">Add Image</string>
+    <string name="save">Save</string>
+    <string name="cancel">Cancel</string>
+    <string name="widget_label">QuickNote Capture</string>
+    <string name="update">Update</string>
+</resources>

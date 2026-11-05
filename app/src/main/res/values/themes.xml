@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.QuickNote" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/clipper_blue</item>
+        <item name="colorPrimaryDark">@color/clipper_blue_dark</item>
+        <item name="colorAccent">@color/clipper_blue</item>
+        <item name="android:windowBackground">@color/background</item>
+    </style>
+
+    <style name="Theme.QuickNote.Dialog" parent="Theme.MaterialComponents.DayNight.Dialog">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="colorPrimary">@color/clipper_blue</item>
+        <item name="colorAccent">@color/clipper_blue</item>
+    </style>
+
+    <style name="Theme.QuickNote.Transparent" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+</resources>
