@@ -1,31 +1,49 @@
 package com.quicknote.app.ui
 
-import android.app.AlertDialog
+import android.app.ActivityManager
+import android.app.ApplicationExitInfo
+import android.app.StatusBarManager
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.Intent
+import android.graphics.drawable.Icon
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.provider.MediaStore
+import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
+import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.tabs.TabLayout
 import com.google.android.material.tabs.TabLayoutMediator
 import com.quicknote.app.R
 import com.quicknote.app.databinding.ActivityMainBinding
 import com.quicknote.app.model.NoteFolder
 import com.quicknote.app.model.SortMode
 import com.quicknote.app.repo.VaultRepository
+import com.quicknote.app.tile.QuickTileService
 import com.quicknote.app.util.NoteEvents
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.text.DateFormat
+import java.util.Date
 
 class MainActivity : AppCompatActivity() {
 
@@ -34,17 +52,14 @@ class MainActivity : AppCompatActivity() {
     private var folders: List<NoteFolder> = emptyList()
     var currentSort: SortMode = SortMode.NEWEST
     private var selecting = false
+    private var askedSetup = false
     private val tileViews = mutableMapOf<String, View>()
+    private val registeredFragments = mutableMapOf<Int, NotesListFragment>()
 
-    private val pickVaultLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        val uri: Uri? = result.data?.data
-        if (uri != null) {
-            repo.setVaultUri(uri)
-            reload()
-        }
+    private val galleryLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val folder = currentFolder()
+        if (uri != null && folder != null) newNoteWithImage(folder, uri)
     }
-
-    private val newImageUriHolder = arrayOfNulls<Uri>(1)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -64,8 +79,6 @@ class MainActivity : AppCompatActivity() {
             }
             override fun afterTextChanged(s: Editable?) {}
         })
-
-        if (!repo.hasVault()) requestVaultAccess() else reload()
     }
 
     override fun onStart() {
@@ -80,32 +93,78 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Silent background refresh: never blocks the screen, so coming back from a note is instant.
-        if (repo.hasVault() && folders.isNotEmpty()) currentFragment()?.reload()
+        if (repo.hasVault()) {
+            if (folders.isEmpty()) reload() else currentFragment()?.reload()
+        } else if (!askedSetup) {
+            askedSetup = true
+            if (!VaultRepository.hasAllFilesAccess()) askAllFilesAccess() else if (repo.rootPath() == null) requestRootFolder()
+        }
     }
 
-    private fun requestVaultAccess() {
+    // ---------------- first-run setup ----------------
+
+    private fun askAllFilesAccess() {
         AlertDialog.Builder(this)
-            .setTitle("Choose Obsidian vault folder")
-            .setMessage("Pick the root folder of your Obsidian vault (or the QuickNotes folder inside it). New notes will be written there as markdown files.")
-            .setCancelable(false)
-            .setPositiveButton("Choose") { _, _ -> pickVaultLauncher.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)) }
+            .setTitle("Allow file access")
+            .setMessage("QuickNote reads and writes your notes as normal files, so it can use any folder you choose (for example in Obsidian). On the next screen, turn on “Allow access to manage all files” for QuickNote, then come back.")
+            .setPositiveButton("Open settings") { _, _ ->
+                askedSetup = false
+                if (Build.VERSION.SDK_INT >= 30) {
+                    startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
+                } else {
+                    ActivityCompat.requestPermissions(
+                        this,
+                        arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE, android.Manifest.permission.WRITE_EXTERNAL_STORAGE), 1
+                    )
+                }
+            }
+            .setNegativeButton("Cancel", null)
             .show()
     }
+
+    private fun requestRootFolder() {
+        AlertDialog.Builder(this)
+            .setTitle("Choose your default notes folder")
+            .setMessage("This is where QuickNote saves new notes, as .md files. Pick the folder you use in Obsidian, for example Documents/Obsidian/QuickAdd. Its subfolders show up as tabs, and you can add folders from anywhere else later.")
+            .setPositiveButton("Choose folder") { _, _ ->
+                val start = repo.rootPath() ?: File(VaultRepository.storageRoot(), "Documents/Obsidian").takeIf { it.isDirectory }?.absolutePath
+                FolderPicker.show(this, "Default notes folder", start) { path ->
+                    repo.setRootPath(path)
+                    reload()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // ---------------- folders / tabs ----------------
 
     private fun reload() {
         lifecycleScope.launch {
             val list = withContext(Dispatchers.IO) { repo.listFolders() }
             folders = list
             registeredFragments.clear()
+            // 1-3 folders share the width equally; more than 3 scroll sideways
+            binding.tabLayout.tabMode = if (list.size <= 3) TabLayout.MODE_FIXED else TabLayout.MODE_SCROLLABLE
+            binding.tabLayout.tabGravity = TabLayout.GRAVITY_FILL
             binding.viewPager.adapter = FolderPagerAdapter(this@MainActivity, list)
             TabLayoutMediator(binding.tabLayout, binding.viewPager) { tab, position ->
                 tab.text = list[position].name
             }.attach()
+            list.forEachIndexed { i, f ->
+                if (repo.isExtraFolder(f)) {
+                    binding.tabLayout.getTabAt(i)?.view?.setOnLongClickListener {
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Remove “${f.name}” from tabs?")
+                            .setMessage("The folder and its notes stay on your phone.")
+                            .setPositiveButton("Remove") { _, _ -> repo.removeExtraFolder(File(f.uri.path ?: "").absolutePath); reload() }
+                            .setNegativeButton("Cancel", null).show()
+                        true
+                    }
+                }
+            }
         }
     }
-
-    private val registeredFragments = mutableMapOf<Int, NotesListFragment>()
 
     fun registerFragment(position: Int, fragment: NotesListFragment) {
         registeredFragments[position] = fragment
@@ -114,6 +173,49 @@ class MainActivity : AppCompatActivity() {
     private fun currentFragment(): NotesListFragment? = registeredFragments[binding.viewPager.currentItem]
 
     fun currentFolder(): NoteFolder? = folders.getOrNull(binding.viewPager.currentItem)
+
+    private fun showNewFolderDialog() {
+        val root = repo.rootPath()
+        var location = (root?.let { File(it).parent } ?: root) ?: VaultRepository.storageRoot().absolutePath
+        val d = resources.displayMetrics.density
+        val name = EditText(this).apply { hint = "Folder name" }
+        val loc = TextView(this).apply { textSize = 12f; setPadding(0, (10 * d).toInt(), 0, (4 * d).toInt()) }
+        fun showLoc() { loc.text = "Created in: $location" }
+        showLoc()
+        val change = Button(this).apply { text = "Change location" }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding((22 * d).toInt(), (10 * d).toInt(), (22 * d).toInt(), 0)
+            addView(name); addView(loc); addView(change)
+        }
+        change.setOnClickListener {
+            FolderPicker.show(this, "Where should the folder be created?", location) { location = it; showLoc() }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("New folder")
+            .setView(box)
+            .setPositiveButton("Create") { _, _ ->
+                val n = name.text.toString().trim()
+                if (n.isEmpty()) return@setPositiveButton
+                lifecycleScope.launch {
+                    val dir = withContext(Dispatchers.IO) { repo.createFolderAt(location, n) }
+                    if (dir == null) Toast.makeText(this@MainActivity, "Couldn't create the folder", Toast.LENGTH_SHORT).show()
+                    else {
+                        repo.addExtraFolder(dir.absolutePath)
+                        reload()
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun addExistingFolder() {
+        FolderPicker.show(this, "Add a folder as a tab", repo.rootPath()) { path ->
+            repo.addExtraFolder(path)
+            reload()
+        }
+    }
 
     // ---------------- multi-select bar ----------------
 
@@ -125,7 +227,7 @@ class MainActivity : AppCompatActivity() {
             Triple("copy", R.drawable.ic_copy, "Copy"),
             Triple("share", R.drawable.ic_share, "Share"),
             Triple("dup", R.drawable.ic_duplicate, "Duplicate"),
-            Triple("move", R.drawable.ic_folder, "Move to..."),
+            Triple("move", R.drawable.ic_folder, "Move to"),
             Triple("delete", R.drawable.ic_delete, "Delete"),
             Triple("up", R.drawable.ic_up, "Move up"),
             Triple("down", R.drawable.ic_down, "Move down")
@@ -184,19 +286,19 @@ class MainActivity : AppCompatActivity() {
         if (selecting) currentFragment()?.exitSelection() else super.onBackPressed()
     }
 
-    // ---------------- add menu (new note / camera / gallery) ----------------
+    // ---------------- add menu (new note / gallery) ----------------
 
     private fun showAddMenu() {
         val folder = currentFolder() ?: return
         AlertDialog.Builder(this)
-            .setItems(arrayOf("New Note", "Camera", "Gallery")) { _, which ->
+            .setItems(arrayOf("New Note", "Gallery")) { _, which ->
                 when (which) {
-                    0 -> lifecycleScope.launch {
-                        val uri = withContext(Dispatchers.IO) { repo.newBlankNote(folder) }
-                        if (uri != null) openEditor(uri, folder)
-                    }
-                    1 -> launchCamera()
-                    2 -> galleryLauncher.launch("image/*")
+                    0 -> startActivity(Intent(this, NoteEditorActivity::class.java).apply {
+                        putExtra("isNew", true)
+                        putExtra("folderUri", folder.uri.toString())
+                        putExtra("folderName", folder.name)
+                    })
+                    1 -> galleryLauncher.launch("image/*")
                 }
             }.show()
     }
@@ -204,40 +306,17 @@ class MainActivity : AppCompatActivity() {
     private fun newNoteWithImage(folder: NoteFolder, source: Uri) {
         lifecycleScope.launch {
             val uri = withContext(Dispatchers.IO) {
-                val ref = repo.importAttachment(folder, source, "img_${System.currentTimeMillis()}.jpg")
-                repo.newBlankNote(folder, if (ref != null) "![[$ref]]\n\n" else "")
+                val a = repo.importAttachmentFull(folder, source, "img_${System.currentTimeMillis()}")
+                repo.newBlankNote(folder, if (a != null) "![[${a.first}]]\n\n" else "")
             }
-            if (uri != null) openEditor(uri, folder)
+            if (uri != null) {
+                startActivity(Intent(this@MainActivity, NoteEditorActivity::class.java).apply {
+                    putExtra("noteUri", uri.toString())
+                    putExtra("folderUri", folder.uri.toString())
+                    putExtra("folderName", folder.name)
+                })
+            }
         }
-    }
-
-    private val galleryLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        val folder = currentFolder()
-        if (uri != null && folder != null) newNoteWithImage(folder, uri)
-    }
-
-    private val cameraLauncher = registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        val uri = newImageUriHolder[0]
-        val folder = currentFolder()
-        if (success && uri != null && folder != null) newNoteWithImage(folder, uri)
-    }
-
-    private fun launchCamera() {
-        val values = android.content.ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, "quicknote_${System.currentTimeMillis()}.jpg")
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-        }
-        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-        newImageUriHolder[0] = uri
-        if (uri != null) cameraLauncher.launch(uri)
-    }
-
-    private fun openEditor(noteUri: Uri, folder: NoteFolder) {
-        val i = Intent(this, NoteEditorActivity::class.java)
-        i.putExtra("noteUri", noteUri.toString())
-        i.putExtra("folderUri", folder.uri.toString())
-        i.putExtra("folderName", folder.name)
-        startActivity(i)
     }
 
     // ---------------- toolbar menu ----------------
@@ -258,22 +337,8 @@ class MainActivity : AppCompatActivity() {
                 binding.searchBar.visibility = if (binding.searchBar.visibility == View.VISIBLE) View.GONE else View.VISIBLE
                 true
             }
-            R.id.action_new_folder -> {
-                val input = EditText(this)
-                AlertDialog.Builder(this)
-                    .setTitle("New folder")
-                    .setView(input)
-                    .setPositiveButton("Create") { _, _ ->
-                        val name = input.text.toString().trim()
-                        if (name.isNotEmpty()) {
-                            lifecycleScope.launch {
-                                withContext(Dispatchers.IO) { repo.createFolder(name) }
-                                reload()
-                            }
-                        }
-                    }.setNegativeButton("Cancel", null).show()
-                true
-            }
+            R.id.action_new_folder -> { showNewFolderDialog(); true }
+            R.id.action_add_folder -> { addExistingFolder(); true }
             R.id.action_sort -> {
                 val modes = arrayOf("Newest", "Oldest", "Alphabetical", "File size", "Manual (drag)")
                 AlertDialog.Builder(this)
@@ -290,11 +355,65 @@ class MainActivity : AppCompatActivity() {
                     }.show()
                 true
             }
-            R.id.action_settings -> {
-                requestVaultAccess()
-                true
-            }
+            R.id.action_settings -> { requestRootFolder(); true }
+            R.id.action_add_tile -> { addTile(); true }
+            R.id.action_diagnostics -> { showDiagnostics(); true }
             else -> super.onOptionsItemSelected(item)
         }
+    }
+
+    private fun addTile() {
+        if (Build.VERSION.SDK_INT >= 33) {
+            val sbm = getSystemService(StatusBarManager::class.java)
+            sbm.requestAddTileService(
+                ComponentName(this, QuickTileService::class.java), "Quick Note",
+                Icon.createWithResource(this, R.drawable.ic_note), mainExecutor
+            ) { }
+        } else {
+            AlertDialog.Builder(this)
+                .setTitle("Add the Quick Settings tile")
+                .setMessage("Swipe down twice to open Quick Settings, tap the pencil / edit icon, and drag the “Quick Note” tile into your active tiles.")
+                .setPositiveButton("OK", null).show()
+        }
+    }
+
+    private fun showDiagnostics() {
+        val sb = StringBuilder()
+        try {
+            val f = File(filesDir, "last_crash.txt")
+            if (f.exists()) sb.append("LAST CRASH\n").append(f.readText().take(3000)).append("\n\n")
+        } catch (e: Exception) {
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                val am = getSystemService(ActivityManager::class.java)
+                for (e in am.getHistoricalProcessExitReasons(packageName, 0, 5)) {
+                    val why = when (e.reason) {
+                        ApplicationExitInfo.REASON_ANR -> "NOT RESPONDING (ANR)"
+                        ApplicationExitInfo.REASON_CRASH -> "CRASH"
+                        ApplicationExitInfo.REASON_CRASH_NATIVE -> "NATIVE CRASH"
+                        ApplicationExitInfo.REASON_LOW_MEMORY -> "LOW MEMORY"
+                        else -> "reason ${e.reason}"
+                    }
+                    sb.append(DateFormat.getDateTimeInstance().format(Date(e.timestamp))).append("  ").append(why)
+                        .append("\n").append(e.description ?: "").append("\n")
+                    if (e.reason == ApplicationExitInfo.REASON_ANR) {
+                        e.traceInputStream?.bufferedReader()?.use { sb.append(it.readText().take(7000)) }
+                    }
+                    sb.append("\n")
+                }
+            } catch (e: Exception) {
+                sb.append("Couldn't read exit info: ").append(e.message)
+            }
+        }
+        if (sb.isEmpty()) sb.append("Nothing recorded yet. If the widget freezes again, open this screen right after and send me the text.")
+        val tv = TextView(this).apply { text = sb.toString(); textSize = 11f; setTextIsSelectable(true); setPadding(40, 20, 40, 20) }
+        AlertDialog.Builder(this)
+            .setTitle("Diagnostics")
+            .setView(ScrollView(this).apply { addView(tv) })
+            .setPositiveButton("Copy") { _, _ ->
+                (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("diag", sb.toString()))
+            }
+            .setNegativeButton("Close", null).show()
     }
 }

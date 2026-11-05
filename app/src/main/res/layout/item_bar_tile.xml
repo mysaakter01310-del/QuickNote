@@ -19,7 +19,12 @@
 
     <TextView
         android:id="@+id/tileLabel"
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
+        android:gravity="center"
+        android:autoSizeTextType="uniform"
+        android:autoSizeMinTextSize="8sp"
+        android:autoSizeMaxTextSize="11sp"
+        android:paddingHorizontal="2dp"
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
         android:singleLine="true"

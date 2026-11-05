@@ -12,8 +12,7 @@
         android:layout_width="20dp"
         android:layout_height="20dp"
         android:src="@drawable/ic_add"
-        app:tint="@android:color/white"
-        xmlns:app="http://schemas.android.com/apk/res-auto" />
+        android:tint="@android:color/white" />
 
     <TextView
         android:id="@+id/widgetLabel"

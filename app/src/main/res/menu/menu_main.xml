@@ -3,6 +3,9 @@
     xmlns:app="http://schemas.android.com/apk/res-auto">
     <item android:id="@+id/action_search" android:title="Search" android:icon="@drawable/ic_search" app:showAsAction="always" />
     <item android:id="@+id/action_sort" android:title="Sort" android:icon="@drawable/ic_sort" app:showAsAction="ifRoom" />
-    <item android:id="@+id/action_new_folder" android:title="New Folder" app:showAsAction="never" />
-    <item android:id="@+id/action_settings" android:title="Settings (change vault)" app:showAsAction="never" />
+    <item android:id="@+id/action_new_folder" android:title="New folder" app:showAsAction="never" />
+    <item android:id="@+id/action_add_folder" android:title="Add existing folder as tab" app:showAsAction="never" />
+    <item android:id="@+id/action_settings" android:title="Default notes folder" app:showAsAction="never" />
+    <item android:id="@+id/action_add_tile" android:title="Add Quick Settings tile" app:showAsAction="never" />
+    <item android:id="@+id/action_diagnostics" android:title="Diagnostics" app:showAsAction="never" />
 </menu>

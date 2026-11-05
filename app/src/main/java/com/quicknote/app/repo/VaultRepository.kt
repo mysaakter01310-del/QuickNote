@@ -2,6 +2,8 @@ package com.quicknote.app.repo
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.provider.DocumentsContract
 import android.webkit.MimeTypeMap
 import com.quicknote.app.model.EditorBlock
@@ -16,111 +18,116 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
 private const val PREFS = "quicknote_prefs"
-private const val KEY_VAULT_URI = "vault_uri"
-private const val KEY_PINNED_NOTES = "pinned_notes"
-private const val KEY_PINNED_FOLDER = "pinned_folder"
-private const val KEY_MANUAL_ORDER_PREFIX = "manual_order_"
+private const val KEY_OLD_VAULT_URI = "vault_uri"
+private const val KEY_ROOT_PATH = "root_path"
+private const val KEY_EXTRA_FOLDERS = "extra_folders"
+private const val KEY_PINNED_NOTES = "pinned_notes_v2"
+private const val KEY_MANUAL_ORDER_PREFIX = "manual_order_v2_"
 private const val INBOX_FOLDER_NAME = "QuickNotes"
-private const val ATTACHMENTS_DIR = "attachments"
+private val IGNORED_DIRS = setOf(".obsidian", ".trash", ".git", ".thumbnails")
 private val IMAGE_TAG_REGEX = Regex("""!\[\[([^\]]+)]]""")
 private val BAD_NAME_CHARS = Regex("[\\\\/:*?\"<>|#^\\[\\]]")
 
-private class Child(val docId: String, val name: String, val mime: String, val modified: Long, val size: Long) {
-    val isDir get() = mime == DocumentsContract.Document.MIME_TYPE_DIR
-}
-
-private class Meta(val title: String, val preview: String, val img: String?, val modified: Long, val size: Long)
+private class Meta(val preview: String, val img: String?, val modified: Long, val size: Long)
 
 private val noteIndex = ConcurrentHashMap<String, Meta>()
 @Volatile private var indexLoaded = false
 
 /**
- * Reads and writes notes directly as markdown files inside the user's chosen vault folder.
+ * Notes are plain .md files read and written directly through normal file paths
+ * (needs Android's "All files access"). That is much faster than the folder-picker system,
+ * and lets each tab be any folder anywhere. Call from a background thread.
  *
- * Speed notes: the folder listing is ONE query (name, date, size together), only the first
- * 8 KB of a note is read for title/preview, and results are cached in an index so unchanged
- * notes are never re-read. Everything here must be called from a background thread.
+ * The file name IS the note title. Nothing else is written into the note body.
  */
 class VaultRepository(private val context: Context) {
 
     companion object {
         fun stamp(): String = SimpleDateFormat("yyyy-MM-dd HHmmss", Locale.US).format(System.currentTimeMillis())
+
         fun extFor(mime: String): String = when {
             mime.contains("png") -> "png"
             mime.contains("webp") -> "webp"
             mime.contains("gif") -> "gif"
             else -> "jpg"
         }
+
+        fun storageRoot(): File = Environment.getExternalStorageDirectory()
+
+        fun hasAllFilesAccess(): Boolean =
+            if (Build.VERSION.SDK_INT >= 30) Environment.isExternalStorageManager() else true
+
+        fun fileOf(uri: Uri): File = File(uri.path ?: "")
+        fun uriOf(file: File): Uri = Uri.fromFile(file)
     }
 
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    private val resolver get() = context.contentResolver
 
-    fun hasVault(): Boolean = getVaultUri() != null
-    fun getVaultUri(): Uri? = prefs.getString(KEY_VAULT_URI, null)?.let { Uri.parse(it) }
+    // ---------------- default folder + extra folders ----------------
 
-    fun setVaultUri(uri: Uri) {
-        context.contentResolver.takePersistableUriPermission(
-            uri,
-            android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-        )
-        prefs.edit().putString(KEY_VAULT_URI, uri.toString()).apply()
-    }
-
-    // ---------------- low-level helpers ----------------
-
-    private fun rootDocUri(): Uri? {
-        val tree = getVaultUri() ?: return null
-        val id = if (DocumentsContract.isDocumentUri(context, tree)) DocumentsContract.getDocumentId(tree)
-        else DocumentsContract.getTreeDocumentId(tree)
-        return DocumentsContract.buildDocumentUriUsingTree(tree, id)
-    }
-
-    fun rootFolder(): NoteFolder? = rootDocUri()?.let { NoteFolder(it, INBOX_FOLDER_NAME, true) }
-
-    private fun docUri(docId: String): Uri = DocumentsContract.buildDocumentUriUsingTree(getVaultUri()!!, docId)
-
-    private fun normalize(created: Uri): Uri = docUri(DocumentsContract.getDocumentId(created))
-
-    private fun children(parentDoc: Uri): List<Child> {
-        val tree = getVaultUri() ?: return emptyList()
-        val out = ArrayList<Child>()
-        try {
-            val uri = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getDocumentId(parentDoc))
-            val cols = arrayOf(
-                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                DocumentsContract.Document.COLUMN_MIME_TYPE,
-                DocumentsContract.Document.COLUMN_LAST_MODIFIED,
-                DocumentsContract.Document.COLUMN_SIZE
-            )
-            resolver.query(uri, cols, null, null, null)?.use { c ->
-                while (c.moveToNext()) {
-                    out.add(
-                        Child(
-                            c.getString(0), c.getString(1) ?: "", c.getString(2) ?: "",
-                            if (c.isNull(3)) 0L else c.getLong(3), if (c.isNull(4)) 0L else c.getLong(4)
-                        )
-                    )
-                }
-            }
+    /** Default folder path. Migrates the old folder-picker choice (primary:Documents/...) once. */
+    fun rootPath(): String? {
+        prefs.getString(KEY_ROOT_PATH, null)?.let { return it }
+        val old = prefs.getString(KEY_OLD_VAULT_URI, null) ?: return null
+        return try {
+            val id = DocumentsContract.getTreeDocumentId(Uri.parse(old))
+            if (id.startsWith("primary:")) {
+                val p = File(storageRoot(), id.removePrefix("primary:")).absolutePath
+                prefs.edit().putString(KEY_ROOT_PATH, p).apply()
+                p
+            } else null
         } catch (e: Exception) {
+            null
         }
-        return out
     }
 
-    private fun isAttachDir(c: Child) = c.isDir && (c.name == ATTACHMENTS_DIR || c.name == ".attachments")
+    fun setRootPath(path: String) {
+        prefs.edit().putString(KEY_ROOT_PATH, path).apply()
+    }
 
-    private fun displayName(uri: Uri): String? = try {
-        resolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use {
-            if (it.moveToFirst()) it.getString(0) else null
-        }
-    } catch (e: Exception) {
-        null
+    fun hasVault(): Boolean {
+        val p = rootPath() ?: return false
+        return hasAllFilesAccess() && File(p).isDirectory
+    }
+
+    fun extraFolderPaths(): List<String> =
+        (prefs.getString(KEY_EXTRA_FOLDERS, "") ?: "").split("|").filter { it.isNotBlank() }
+
+    fun addExtraFolder(path: String) {
+        val list = extraFolderPaths().toMutableList()
+        if (path !in list && path != rootPath()) list.add(path)
+        prefs.edit().putString(KEY_EXTRA_FOLDERS, list.joinToString("|")).apply()
+    }
+
+    fun removeExtraFolder(path: String) {
+        val list = extraFolderPaths().filter { it != path }
+        prefs.edit().putString(KEY_EXTRA_FOLDERS, list.joinToString("|")).apply()
+    }
+
+    fun isExtraFolder(folder: NoteFolder) = fileOf(folder.uri).absolutePath in extraFolderPaths()
+
+    fun rootFolder(): NoteFolder? = rootPath()?.let { NoteFolder(uriOf(File(it)), INBOX_FOLDER_NAME, true) }
+
+    /** Creates parent/name and returns it (null if it already exists or fails). */
+    fun createFolderAt(parentPath: String, name: String): File? {
+        val clean = sanitizeFileName(name)
+        val dir = File(parentPath, clean)
+        if (dir.exists()) return dir
+        return if (dir.mkdirs()) dir else null
     }
 
     fun sanitizeFileName(s: String): String =
         s.replace(BAD_NAME_CHARS, "-").trim().take(80).trim('.', ' ').ifBlank { "Note ${stamp()}" }
+
+    private fun uniqueFile(dir: File, base: String, ext: String): File {
+        var f = File(dir, "$base.$ext")
+        var i = 1
+        while (f.exists()) {
+            f = File(dir, "$base ($i).$ext")
+            i++
+        }
+        return f
+    }
 
     // ---------------- index cache ----------------
 
@@ -129,15 +136,12 @@ class VaultRepository(private val context: Context) {
         synchronized(noteIndex) {
             if (indexLoaded) return
             try {
-                val f = File(context.filesDir, "note_index.json")
+                val f = File(context.filesDir, "note_index_v2.json")
                 if (f.exists()) {
                     val arr = JSONArray(f.readText())
                     for (i in 0 until arr.length()) {
                         val o = arr.getJSONObject(i)
-                        noteIndex[o.getString("k")] = Meta(
-                            o.getString("t"), o.getString("p"), o.optString("i").ifEmpty { null },
-                            o.getLong("m"), o.getLong("s")
-                        )
+                        noteIndex[o.getString("k")] = Meta(o.getString("p"), o.optString("i").ifEmpty { null }, o.getLong("m"), o.getLong("s"))
                     }
                 }
             } catch (e: Exception) {
@@ -150,15 +154,15 @@ class VaultRepository(private val context: Context) {
         try {
             val arr = JSONArray()
             for ((k, v) in noteIndex) {
-                arr.put(JSONObject().put("k", k).put("t", v.title).put("p", v.preview).put("i", v.img ?: "").put("m", v.modified).put("s", v.size))
+                arr.put(JSONObject().put("k", k).put("p", v.preview).put("i", v.img ?: "").put("m", v.modified).put("s", v.size))
             }
-            File(context.filesDir, "note_index.json").writeText(arr.toString())
+            File(context.filesDir, "note_index_v2.json").writeText(arr.toString())
         } catch (e: Exception) {
         }
     }
 
-    private fun readHead(uri: Uri, max: Int): String? = try {
-        resolver.openInputStream(uri)?.use { s ->
+    private fun readHead(file: File, max: Int): String = try {
+        file.inputStream().use { s ->
             val buf = ByteArray(max)
             var n = 0
             while (n < max) {
@@ -169,95 +173,88 @@ class VaultRepository(private val context: Context) {
             String(buf, 0, n, Charsets.UTF_8)
         }
     } catch (e: Exception) {
-        null
+        ""
     }
 
-    private fun readMeta(uri: Uri, c: Child): Meta {
-        val fallback = c.name.removeSuffix(".md")
-        val head = readHead(uri, 8192) ?: return Meta(fallback, "", null, c.modified, c.size)
-        val lines = head.lines()
-        val title = lines.firstOrNull { it.isNotBlank() }?.removePrefix("# ")?.trim()?.ifBlank { fallback } ?: fallback
-        val preview = lines.drop(1).joinToString(" ").replace(IMAGE_TAG_REGEX, "").trim().take(140)
+    private fun readMeta(file: File): Meta {
+        val head = readHead(file, 8192)
+        var lines = head.lines()
+        val first = lines.indexOfFirst { it.isNotBlank() }
+        // old notes may start with "# heading": the file name is the title now, so skip that line in the preview
+        if (first >= 0 && lines[first].startsWith("# ")) lines = lines.drop(first + 1)
+        val preview = lines.joinToString(" ").replace(IMAGE_TAG_REGEX, "").trim().take(140)
         val img = IMAGE_TAG_REGEX.find(head)?.groupValues?.get(1)
-        return Meta(title, preview, img, c.modified, c.size)
+        return Meta(preview, img, file.lastModified(), file.length())
     }
 
     // ---------------- Folders ----------------
 
+    /** Default folder, its subfolders (hidden ones too), and any extra folders you added. */
     fun listFolders(): List<NoteFolder> {
-        val root = rootDocUri() ?: return emptyList()
-        val pinnedName = prefs.getString(KEY_PINNED_FOLDER, null)
-        val subs = children(root)
-            .filter { it.isDir && !it.name.startsWith(".") && it.name != ATTACHMENTS_DIR }
+        val rootP = rootPath() ?: return emptyList()
+        val root = File(rootP)
+        val result = ArrayList<NoteFolder>()
+        result.add(NoteFolder(uriOf(root), INBOX_FOLDER_NAME, true))
+        val seen = hashSetOf(root.absolutePath)
+        val subs = (root.listFiles { f -> f.isDirectory && f.name !in IGNORED_DIRS && f.name != "attachments" } ?: emptyArray())
             .sortedBy { it.name.lowercase() }
-            .map { NoteFolder(docUri(it.docId), it.name, it.name == pinnedName) }
-        return listOf(NoteFolder(root, INBOX_FOLDER_NAME, true)) + subs
-    }
-
-    fun createFolder(name: String): Boolean {
-        val root = rootDocUri() ?: return false
-        return try {
-            DocumentsContract.createDocument(resolver, root, DocumentsContract.Document.MIME_TYPE_DIR, name) != null
-        } catch (e: Exception) {
-            false
+        for (d in subs) if (seen.add(d.absolutePath)) result.add(NoteFolder(uriOf(d), d.name))
+        for (p in extraFolderPaths()) {
+            val d = File(p)
+            if (d.isDirectory && seen.add(d.absolutePath)) result.add(NoteFolder(uriOf(d), d.name))
         }
-    }
-
-    fun deleteFolder(folder: NoteFolder): Boolean = deleteUri(folder.uri)
-
-    fun renameFolder(folder: NoteFolder, newName: String): Boolean = try {
-        DocumentsContract.renameDocument(resolver, folder.uri, newName) != null
-    } catch (e: Exception) {
-        false
-    }
-
-    fun setPinnedFolder(name: String?) {
-        prefs.edit().putString(KEY_PINNED_FOLDER, name).apply()
+        return result
     }
 
     // ---------------- Notes ----------------
 
-    /** hydrate=false: instant, uses cached info (or file names). hydrate=true: reads changed notes only. */
+    private fun attachDir(folderDir: File): File? =
+        listOf(".attachments", "attachments").map { File(folderDir, it) }.firstOrNull { it.isDirectory }
+
     fun listNotes(folder: NoteFolder, sortMode: SortMode, query: String? = null, hydrate: Boolean = true): List<Note> {
         ensureIndex()
-        val kids = children(folder.uri)
+        val dir = fileOf(folder.uri)
+        val files = dir.listFiles { f -> f.isFile && f.name.endsWith(".md", true) } ?: emptyArray()
         val pinned = pinnedNoteUris()
-        val attachDir = kids.firstOrNull { isAttachDir(it) }
-        var attachMap: Map<String, Uri>? = null
+        val attach = if (files.isNotEmpty()) attachDir(dir) else null
         var dirty = false
-        var notes = ArrayList<Note>()
-        for (k in kids) {
-            if (k.isDir || !k.name.endsWith(".md")) continue
-            val uri = docUri(k.docId)
-            val key = uri.toString()
+        val notes = ArrayList<Note>(files.size)
+        for (f in files) {
+            val key = uriOf(f).toString()
             var meta = noteIndex[key]
-            if (hydrate && (meta == null || meta.modified != k.modified || meta.size != k.size)) {
-                meta = readMeta(uri, k)
+            val mod = f.lastModified()
+            val len = f.length()
+            if (meta == null || meta.modified != mod || meta.size != len) {
+                meta = readMeta(f)
                 noteIndex[key] = meta
                 dirty = true
             }
-            val m: Meta = meta ?: Meta(k.name.removeSuffix(".md"), "", null, k.modified, k.size)
             var imgUri: Uri? = null
-            val imgName = m.img
-            if (imgName != null && attachDir != null) {
-                if (attachMap == null) attachMap = attachmentMapOf(attachDir.docId)
-                imgUri = attachMap[imgName.substringAfterLast("/")]
+            val imgName = meta.img
+            if (imgName != null && attach != null) {
+                val img = File(attach, imgName.substringAfterLast("/"))
+                if (img.exists()) imgUri = uriOf(img)
             }
             notes.add(
                 Note(
-                    uri = uri, fileName = k.name, title = m.title, preview = m.preview, firstImageUri = imgUri,
-                    dateModified = k.modified, sizeBytes = k.size, isPinned = pinned.contains(key)
+                    uri = uriOf(f), fileName = f.name, title = f.name.removeSuffix(".md").removeSuffix(".MD"),
+                    preview = meta.preview, firstImageUri = imgUri, dateModified = mod, sizeBytes = len,
+                    isPinned = pinned.contains(key)
                 )
             )
         }
         if (dirty) saveIndex()
-
         var result: List<Note> = notes
         if (!query.isNullOrBlank()) {
             val q = query.lowercase()
             result = result.filter { it.title.lowercase().contains(q) || it.preview.lowercase().contains(q) }
         }
-        val (pinnedNotes, rest) = result.partition { it.isPinned }
+        return arrange(result, folder, sortMode)
+    }
+
+    /** Pure ordering (no file access): pinned first, then the chosen sort. Also used for instant UI updates. */
+    fun arrange(notes: List<Note>, folder: NoteFolder, sortMode: SortMode): List<Note> {
+        val (pinnedNotes, rest) = notes.partition { it.isPinned }
         val sortedRest = when (sortMode) {
             SortMode.NEWEST -> rest.sortedByDescending { it.dateModified }
             SortMode.OLDEST -> rest.sortedBy { it.dateModified }
@@ -275,44 +272,58 @@ class VaultRepository(private val context: Context) {
     }
 
     fun readText(uri: Uri): String? = try {
-        resolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+        fileOf(uri).readText()
     } catch (e: Exception) {
         null
     }
 
     fun writeText(uri: Uri, text: String): Boolean = try {
-        resolver.openOutputStream(uri, "wt")?.use { it.write(text.toByteArray()) }
+        fileOf(uri).writeText(text)
         true
     } catch (e: Exception) {
         false
     }
 
-    /** Creates a note file. baseName null => "Note <date time>". Returns the note's Uri. */
-    fun createNote(folder: NoteFolder, initialText: String, baseName: String? = null): Uri? {
-        val name = (baseName?.takeIf { it.isNotBlank() } ?: "Note ${stamp()}") + ".md"
-        val created = try {
-            DocumentsContract.createDocument(resolver, folder.uri, "text/markdown", name)
-        } catch (e: Exception) {
-            null
-        } ?: return null
-        val uri = normalize(created)
-        writeText(uri, initialText)
-        return uri
+    /** Creates "<baseName>.md" (or "Note <date time>.md"). The title is the file name; the body is just the text. */
+    fun createNote(folder: NoteFolder, text: String, baseName: String? = null): Uri? = try {
+        val dir = fileOf(folder.uri)
+        dir.mkdirs()
+        val f = uniqueFile(dir, baseName?.takeIf { it.isNotBlank() }?.let { sanitizeFileName(it) } ?: "Note ${stamp()}", "md")
+        f.writeText(text)
+        uriOf(f)
+    } catch (e: Exception) {
+        null
     }
 
-    /** A new empty note with a unique "Note <date time>" title. */
-    fun newBlankNote(folder: NoteFolder, extraBody: String = ""): Uri? {
-        val title = "Note ${stamp()}"
-        return createNote(folder, "# $title\n\n$extraBody", title)
+    fun newBlankNote(folder: NoteFolder, body: String = ""): Uri? = createNote(folder, body, null)
+
+    /** Renames a note's file (its title). Returns the new Uri, or the old one if nothing changed. */
+    fun renameNote(uri: Uri, newTitle: String): Uri? = try {
+        val f = fileOf(uri)
+        val clean = sanitizeFileName(newTitle)
+        if (clean == f.name.removeSuffix(".md")) uri
+        else {
+            val target = uniqueFile(f.parentFile!!, clean, "md")
+            if (f.renameTo(target)) {
+                val pinned = pinnedNoteUris().toMutableSet()
+                if (pinned.remove(uri.toString())) {
+                    pinned.add(uriOf(target).toString())
+                    prefs.edit().putStringSet(KEY_PINNED_NOTES, pinned).apply()
+                }
+                uriOf(target)
+            } else null
+        }
+    } catch (e: Exception) {
+        null
     }
 
     fun duplicateNote(note: Note, folder: NoteFolder): Boolean {
         val text = readText(note.uri) ?: return false
-        return createNote(folder, text, note.fileName.removeSuffix(".md") + " copy") != null
+        return createNote(folder, text, note.title + " copy") != null
     }
 
     fun deleteUri(uri: Uri): Boolean = try {
-        DocumentsContract.deleteDocument(resolver, uri)
+        fileOf(uri).delete()
     } catch (e: Exception) {
         false
     }
@@ -320,10 +331,18 @@ class VaultRepository(private val context: Context) {
     fun deleteNote(note: Note): Boolean = deleteUri(note.uri)
 
     fun moveNote(note: Note, fromFolder: NoteFolder, toFolder: NoteFolder): Boolean {
+        val src = fileOf(note.uri)
+        val toDir = fileOf(toFolder.uri)
         val text = readText(note.uri) ?: return false
-        val moved = carryAttachments(text, fromFolder, toFolder)
-        if (createNote(toFolder, moved, note.fileName.removeSuffix(".md")) == null) return false
-        return deleteNote(note)
+        val carried = carryAttachments(text, fromFolder, toFolder)
+        val target = uniqueFile(toDir, note.title, "md")
+        return try {
+            target.writeText(carried)
+            target.setLastModified(src.lastModified())
+            src.delete()
+        } catch (e: Exception) {
+            false
+        }
     }
 
     private fun carryAttachments(text: String, from: NoteFolder, to: NoteFolder): String {
@@ -339,7 +358,13 @@ class VaultRepository(private val context: Context) {
         return out
     }
 
-    /** Joins notes (in the given order) into one new note. Returns the new note's Uri. */
+    /** Old notes may begin with "# heading"; the file name is the title, so that line is dropped when joining. */
+    private fun bodyOf(text: String): String {
+        val lines = text.lines()
+        val first = lines.indexOfFirst { it.isNotBlank() }
+        return (if (first >= 0 && lines[first].startsWith("# ")) lines.drop(first + 1).joinToString("\n") else text).trim()
+    }
+
     fun compileNotes(
         folder: NoteFolder, notes: List<Note>, titleInput: String,
         separator: String, includeTitles: Boolean, deleteOriginals: Boolean
@@ -348,12 +373,8 @@ class VaultRepository(private val context: Context) {
         val parts = ArrayList<String>()
         for (n in notes) {
             val t = readText(n.uri) ?: continue
-            val lines = t.lines()
-            val first = lines.indexOfFirst { it.isNotBlank() }
-            val heading = first >= 0 && lines[first].startsWith("# ")
-            val body = (if (heading) lines.drop(first + 1).joinToString("\n") else t).trim()
-            val noteTitle = if (heading) lines[first].removePrefix("# ").trim() else n.title
-            parts.add(if (includeTitles) "**$noteTitle**\n\n$body".trim() else body)
+            val body = bodyOf(t)
+            parts.add(if (includeTitles) "**${n.title}**\n\n$body".trim() else body)
         }
         if (parts.isEmpty()) return null
         val sep = when (separator) {
@@ -361,61 +382,46 @@ class VaultRepository(private val context: Context) {
             "blank" -> "\n\n"
             else -> "\n"
         }
-        val uri = createNote(folder, "# $title\n\n" + parts.joinToString(sep) + "\n", sanitizeFileName(title)) ?: return null
+        val uri = createNote(folder, parts.joinToString(sep) + "\n", title) ?: return null
         if (deleteOriginals && parts.size == notes.size) notes.forEach { deleteUri(it.uri) }
         return uri
     }
 
     // ---------------- Attachments ----------------
 
-    private fun attachmentMapOf(dirDocId: String): Map<String, Uri> =
-        children(docUri(dirDocId)).filter { !it.isDir }.associate { it.name to docUri(it.docId) }
-
     fun attachmentMap(folder: NoteFolder): Map<String, Uri> {
-        val dir = children(folder.uri).firstOrNull { isAttachDir(it) } ?: return emptyMap()
-        return attachmentMapOf(dir.docId)
+        val dir = attachDir(fileOf(folder.uri)) ?: return emptyMap()
+        return (dir.listFiles { f -> f.isFile } ?: emptyArray()).associate { it.name to uriOf(it) }
     }
 
     /** Copies an image into the folder's attachments dir. Returns (embed ref, new file Uri). */
     fun importAttachmentFull(folder: NoteFolder, source: Uri, baseName: String): Pair<String, Uri>? {
         return try {
-            val existing = children(folder.uri).firstOrNull { isAttachDir(it) }
-            val dirUri: Uri
-            val dirName: String
-            if (existing != null) {
-                dirUri = docUri(existing.docId)
-                dirName = existing.name
-            } else {
-                val c = DocumentsContract.createDocument(resolver, folder.uri, DocumentsContract.Document.MIME_TYPE_DIR, ATTACHMENTS_DIR) ?: return null
-                dirUri = normalize(c)
-                dirName = ATTACHMENTS_DIR
-            }
+            val folderDir = fileOf(folder.uri)
+            val dir = attachDir(folderDir) ?: File(folderDir, "attachments").apply { mkdirs() }
             val ext = (source.lastPathSegment ?: "").substringAfterLast('.', "").lowercase()
-            val mime = resolver.getType(source)
+            val mime = context.contentResolver.getType(source)
                 ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
                 ?: "image/jpeg"
-            val created = DocumentsContract.createDocument(resolver, dirUri, mime, baseName + "." + extFor(mime)) ?: return null
-            val target = normalize(created)
-            resolver.openInputStream(source)?.use { input ->
-                resolver.openOutputStream(target)?.use { output -> input.copyTo(output) }
-            }
-            val name = displayName(target) ?: (baseName + "." + extFor(mime))
-            Pair("$dirName/$name", target)
+            val target = uniqueFile(dir, baseName, extFor(mime))
+            context.contentResolver.openInputStream(source)?.use { input ->
+                target.outputStream().use { out -> input.copyTo(out) }
+            } ?: return null
+            Pair("${dir.name}/${target.name}", uriOf(target))
         } catch (e: Exception) {
             null
         }
     }
 
-    fun importAttachment(folder: NoteFolder, sourceUri: Uri, suggestedName: String): String? =
-        importAttachmentFull(folder, sourceUri, suggestedName.substringBeforeLast("."))?.first
-
     // ---------------- Pin / Manual order ----------------
 
     private fun pinnedNoteUris(): Set<String> = prefs.getStringSet(KEY_PINNED_NOTES, emptySet()) ?: emptySet()
 
-    fun setNotePinned(note: Note, pinned: Boolean) {
+    fun setNotePinned(note: Note, pinned: Boolean) = setNotesPinned(listOf(note), pinned)
+
+    fun setNotesPinned(notes: List<Note>, pinned: Boolean) {
         val set = pinnedNoteUris().toMutableSet()
-        if (pinned) set.add(note.uri.toString()) else set.remove(note.uri.toString())
+        for (n in notes) if (pinned) set.add(n.uri.toString()) else set.remove(n.uri.toString())
         prefs.edit().putStringSet(KEY_PINNED_NOTES, set).apply()
     }
 
@@ -433,24 +439,16 @@ class VaultRepository(private val context: Context) {
         prefs.edit().putString(manualOrderKey(folder), notes.joinToString("|") { it.uri.toString() }).apply()
     }
 
-    fun moveNoteUp(folder: NoteFolder, notes: List<Note>, note: Note) {
+    /** Returns the new order (instant, no file access). */
+    fun moveInList(notes: List<Note>, note: Note, up: Boolean): List<Note> {
         val list = notes.toMutableList()
         val i = list.indexOfFirst { it.uri == note.uri }
-        if (i > 0) {
-            list.removeAt(i)
-            list.add(i - 1, note)
-        }
-        saveManualOrder(folder, list)
-    }
-
-    fun moveNoteDown(folder: NoteFolder, notes: List<Note>, note: Note) {
-        val list = notes.toMutableList()
-        val i = list.indexOfFirst { it.uri == note.uri }
-        if (i in 0 until list.size - 1) {
-            list.removeAt(i)
-            list.add(i + 1, note)
-        }
-        saveManualOrder(folder, list)
+        if (i < 0) return notes
+        val j = if (up) i - 1 else i + 1
+        if (j < 0 || j >= list.size) return notes
+        list.removeAt(i)
+        list.add(j, note)
+        return list
     }
 
     // ---------------- Block-based body parsing (for the editor) ----------------

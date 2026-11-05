@@ -62,32 +62,29 @@ object QuickSaver {
             imported.add(a.second)
         }
         if (edit) {
-            val sb = StringBuilder()
-            if (d.editHasHeading) sb.append("# ").append(d.title.trim().ifBlank { "Note " + VaultRepository.stamp() }).append("\n\n")
-            sb.append(d.body.trimEnd()).append("\n")
-            for (r in refs) sb.append("\n![[").append(r).append("]]\n")
-            val uri = Uri.parse(d.editNoteUri)
-            return if (repo.writeText(uri, sb.toString())) Result(uri, d.title, imported, folder.name) else null
+            val sb = StringBuilder(d.body.trimEnd())
+            for (r in refs) sb.append("\n\n![[").append(r).append("]]")
+            sb.append("\n")
+            var uri = Uri.parse(d.editNoteUri)
+            if (!repo.writeText(uri, sb.toString())) return null
+            val wanted = d.title.trim()
+            if (wanted.isNotEmpty()) uri = repo.renameNote(uri, wanted) ?: uri
+            return Result(uri, wanted, imported, folder.name)
         }
         val title = d.title.trim().ifBlank { "Note " + VaultRepository.stamp() }
-        val sb = StringBuilder("# ").append(title).append("\n\n")
+        val sb = StringBuilder()
         for (r in refs) sb.append("![[").append(r).append("]]\n\n")
         sb.append(d.body.trim()).append("\n")
-        val uri = repo.createNote(folder, sb.toString(), repo.sanitizeFileName(title)) ?: return null
+        val uri = repo.createNote(folder, sb.toString(), title) ?: return null
         return Result(uri, title, imported, folder.name)
     }
 
-    /** Loads an existing note into an editable draft. Background thread. */
+    /** Loads an existing note into an editable draft: title = file name, body = the whole file. Background thread. */
     fun loadForEdit(repo: VaultRepository, note: Note, folder: NoteFolder): Draft? {
         val text = repo.readText(note.uri) ?: return null
-        val lines = text.lines()
-        val first = lines.indexOfFirst { it.isNotBlank() }
-        val hasHeading = first >= 0 && lines[first].startsWith("# ")
-        val title = if (hasHeading) lines[first].removePrefix("# ").trim() else note.fileName.removeSuffix(".md")
-        val body = if (hasHeading) lines.drop(first + 1).joinToString("\n").trimStart('\n') else text
         return Draft(
-            title = title, body = body, folderUri = folder.uri.toString(), folderName = folder.name,
-            editNoteUri = note.uri.toString(), editFolderUri = folder.uri.toString(), editHasHeading = hasHeading
+            title = note.title, body = text, folderUri = folder.uri.toString(), folderName = folder.name,
+            editNoteUri = note.uri.toString(), editFolderUri = folder.uri.toString(), editHasHeading = false
         )
     }
 }

@@ -115,10 +115,8 @@ class NotesListFragment : Fragment() {
         if (_binding == null) return
         reloadJob?.cancel()
         reloadJob = viewLifecycleOwner.lifecycleScope.launch {
-            val fast = withContext(Dispatchers.IO) { repo.listNotes(folder, sortMode, currentQuery, hydrate = false) }
-            show(fast)
-            val full = withContext(Dispatchers.IO) { repo.listNotes(folder, sortMode, currentQuery, hydrate = true) }
-            show(full)
+            val list = withContext(Dispatchers.IO) { repo.listNotes(folder, sortMode, currentQuery) }
+            show(list)
             _binding?.swipeRefresh?.isRefreshing = false
         }
     }
@@ -220,8 +218,14 @@ class NotesListFragment : Fragment() {
 
     fun pinSelected() {
         val notes = adapter.selectedNotes()
+        if (notes.isEmpty()) return
         val pin = !notes.all { it.isPinned }
-        runBg(if (pin) "Pinned" else "Unpinned") { notes.forEach { repo.setNotePinned(it, pin) } }
+        repo.setNotesPinned(notes, pin) // in-memory write, instant
+        val keys = notes.map { it.uri.toString() }.toSet()
+        val updated = adapter.currentNotes().map { if (it.uri.toString() in keys) it.copy(isPinned = pin) else it }
+        show(repo.arrange(updated, folder, sortMode))
+        exitSelection()
+        toastApp(if (pin) "Pinned" else "Unpinned")
     }
 
     fun copySelected() {
@@ -267,26 +271,35 @@ class NotesListFragment : Fragment() {
         val notes = adapter.selectedNotes()
         AlertDialog.Builder(requireContext())
             .setTitle(if (notes.size == 1) "Delete note?" else "Delete ${notes.size} notes?")
-            .setMessage("This deletes the markdown files from your vault.")
-            .setPositiveButton("Delete") { _, _ -> runBg("Deleted") { notes.forEach { repo.deleteNote(it) } } }
+            .setMessage("This deletes the markdown files from your phone.")
+            .setPositiveButton("Delete") { _, _ ->
+                val keys = notes.map { it.uri.toString() }.toSet()
+                show(adapter.currentNotes().filter { it.uri.toString() !in keys })
+                exitSelection()
+                AppScope.scope.launch { notes.forEach { repo.deleteNote(it) } }
+            }
             .setNegativeButton("Cancel", null).show()
     }
 
-    /** Works for exactly one selected note; the buttons stay visible but dim otherwise. */
+    /** Works for exactly one selected note; the buttons stay visible but dim otherwise. Instant, selection stays. */
     fun moveSelectedUpDown(up: Boolean) {
         if (adapter.selection.size != 1) {
             toastApp("Select one note to move it")
             return
         }
         val note = adapter.selectedNotes().firstOrNull() ?: return
-        val list = adapter.currentNotes()
-        viewLifecycleOwner.lifecycleScope.launch {
-            withContext(Dispatchers.IO) {
-                if (up) repo.moveNoteUp(folder, list, note) else repo.moveNoteDown(folder, list, note)
-            }
-            (activity as? MainActivity)?.currentSort = SortMode.MANUAL
-            setSortMode(SortMode.MANUAL)
+        // take the order you see (pinned stay on top), switch to manual sort, move one step
+        val current = adapter.currentNotes()
+        val unpinned = current.filter { !it.isPinned }
+        if (note.isPinned) {
+            toastApp("Unpin it first to move it")
+            return
         }
+        val moved = repo.moveInList(unpinned, note, up)
+        repo.saveManualOrder(folder, moved)
+        sortMode = SortMode.MANUAL
+        (activity as? MainActivity)?.currentSort = SortMode.MANUAL
+        show(repo.arrange(current, folder, SortMode.MANUAL))
     }
 
     fun compileSelected() {

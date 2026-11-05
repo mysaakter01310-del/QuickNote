@@ -57,7 +57,7 @@ class QuickAddActivity : AppCompatActivity() {
         repo = VaultRepository(applicationContext)
 
         if (!repo.hasVault()) {
-            Toast.makeText(this, "Open QuickNote once and choose your vault folder first.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Open QuickNote once to allow file access and choose your notes folder.", Toast.LENGTH_LONG).show()
             finish()
             return
         }

@@ -1,15 +1,13 @@
 package com.quicknote.app.ui
 
-import android.content.ContentValues
 import android.net.Uri
 import android.os.Bundle
-import android.provider.MediaStore
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.quicknote.app.databinding.ActivityNoteEditorBinding
-import com.quicknote.app.model.EditorBlock
 import com.quicknote.app.model.NoteFolder
 import com.quicknote.app.repo.VaultRepository
 import com.quicknote.app.util.AppScope
@@ -18,42 +16,48 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * The note title is the file name. A new note's file is only created when you save.
+ * Leaving without changes touches nothing, so reading a note never moves it in the list.
+ */
 class NoteEditorActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityNoteEditorBinding
     private lateinit var repo: VaultRepository
-    private lateinit var noteUri: Uri
+    private var noteUri: Uri? = null
     private lateinit var folder: NoteFolder
     private var blockAdapter: EditorBlockAdapter? = null
     private var loaded = false
     private var focusedBlockIndex = 0
-    private val newImageUriHolder = arrayOfNulls<Uri>(1)
+    private var initialTitle = ""
+    private var initialText = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityNoteEditorBinding.inflate(layoutInflater)
         setContentView(binding.root)
         setSupportActionBar(binding.editorToolbar.root)
-        binding.editorToolbar.root.setNavigationOnClickListener { saveAndFinish() }
+        binding.editorToolbar.root.setNavigationOnClickListener { onBackPressed() }
+        binding.editorToolbar.btnSaveTick.setOnClickListener { save(true) }
 
         repo = VaultRepository(this)
-        noteUri = Uri.parse(intent.getStringExtra("noteUri"))
+        noteUri = intent.getStringExtra("noteUri")?.let { Uri.parse(it) }
         folder = NoteFolder(
             uri = Uri.parse(intent.getStringExtra("folderUri")),
             name = intent.getStringExtra("folderName") ?: ""
         )
         binding.recyclerBlocks.layoutManager = LinearLayoutManager(this)
 
-        // Read the note in the background so the screen opens instantly.
         lifecycleScope.launch {
+            val uri = noteUri
             val data = withContext(Dispatchers.IO) {
-                val fullText = repo.readText(noteUri) ?: ""
-                val lines = fullText.lines()
-                val title = lines.firstOrNull()?.removePrefix("# ")?.trim() ?: ""
-                val body = lines.drop(1).joinToString("\n").trimStart('\n')
-                Pair(title, repo.parseBlocks(body, folder).toMutableList())
+                val text = if (uri != null) repo.readText(uri) ?: "" else ""
+                Pair(text, repo.parseBlocks(text, folder).toMutableList())
             }
-            binding.editTitle.setText(data.first)
+            val title = uri?.path?.let { java.io.File(it).name.removeSuffix(".md") } ?: ""
+            binding.editTitle.setText(title)
+            initialTitle = title
+            initialText = data.first
             val adapter = EditorBlockAdapter(
                 blocks = data.second,
                 onFocusChanged = { index -> focusedBlockIndex = index },
@@ -65,27 +69,11 @@ class NoteEditorActivity : AppCompatActivity() {
         }
 
         binding.btnAddImageGallery.setOnClickListener { if (loaded) galleryLauncher.launch("image/*") }
-        binding.btnAddImageCamera.setOnClickListener { if (loaded) launchCamera() }
     }
 
     private val galleryLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri ?: return@registerForActivityResult
         insertImageAtFocus(uri)
-    }
-
-    private val cameraLauncher = registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        val uri = newImageUriHolder[0]
-        if (success && uri != null) insertImageAtFocus(uri)
-    }
-
-    private fun launchCamera() {
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, "quicknote_${System.currentTimeMillis()}.jpg")
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-        }
-        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-        newImageUriHolder[0] = uri
-        if (uri != null) cameraLauncher.launch(uri)
     }
 
     private fun insertImageAtFocus(sourceUri: Uri) {
@@ -97,23 +85,51 @@ class NoteEditorActivity : AppCompatActivity() {
         }
     }
 
-    private fun saveAndFinish() {
-        val adapter = blockAdapter
-        if (loaded && adapter != null) {
-            val title = binding.editTitle.text.toString().trim().ifBlank { "Note " + VaultRepository.stamp() }
-            val fullText = "# $title\n\n" + repo.serializeBlocks(adapter.currentBlocks())
-            val app = applicationContext
-            val uri = noteUri
-            // Write in the background, close the screen immediately.
-            AppScope.scope.launch {
-                VaultRepository(app).writeText(uri, fullText)
-                NoteEvents.notifyChanged()
+    private fun currentText(): String = blockAdapter?.let { repo.serializeBlocks(it.currentBlocks()) } ?: initialText
+
+    private fun isDirty(): Boolean {
+        if (!loaded) return false
+        return binding.editTitle.text.toString().trim() != initialTitle.trim() || currentText() != initialText
+    }
+
+    private fun isEmptyNew(): Boolean =
+        noteUri == null && binding.editTitle.text.toString().isBlank() && currentText().isBlank()
+
+    /** Saves in the background and closes. Nothing is written if nothing changed. */
+    private fun save(close: Boolean) {
+        if (!loaded) { finish(); return }
+        val newTitle = binding.editTitle.text.toString().trim()
+        val text = currentText()
+        val existing = noteUri
+        if (existing == null && isEmptyNew()) { finish(); return }
+        if (existing != null && !isDirty()) { finish(); return }
+        val app = applicationContext
+        val f = folder
+        val textChanged = text != initialText
+        AppScope.scope.launch {
+            val r = VaultRepository(app)
+            if (existing == null) {
+                r.createNote(f, text, newTitle.ifBlank { null })
+            } else {
+                var uri: Uri = existing
+                if (textChanged) r.writeText(uri, text)
+                if (newTitle.isNotEmpty() && newTitle != initialTitle.trim()) uri = r.renameNote(uri, newTitle) ?: uri
             }
+            NoteEvents.notifyChanged()
         }
-        finish()
+        if (close) finish()
     }
 
     override fun onBackPressed() {
-        saveAndFinish()
+        if (!isDirty() && !(noteUri == null && !isEmptyNew())) {
+            finish()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Save changes?")
+            .setPositiveButton("Save") { _, _ -> save(true) }
+            .setNegativeButton("Discard") { _, _ -> finish() }
+            .setNeutralButton("Keep editing", null)
+            .show()
     }
 }

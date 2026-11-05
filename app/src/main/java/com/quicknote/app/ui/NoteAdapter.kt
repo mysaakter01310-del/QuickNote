@@ -94,7 +94,7 @@ class NoteAdapter(
             }
         } else {
             b.txtBadge.visibility = View.GONE
-            b.imgDrag.visibility = if (dragEnabled) View.VISIBLE else View.INVISIBLE
+            b.imgDrag.visibility = if (dragEnabled) View.VISIBLE else View.GONE
         }
 
         b.imgDrag.setOnTouchListener { _, e ->

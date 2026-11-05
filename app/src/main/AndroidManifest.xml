@@ -1,13 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
+        android:name=".QuickNoteApp"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="QuickNote"
@@ -26,11 +29,6 @@
 
         <activity
             android:name=".ui.NoteEditorActivity"
-            android:exported="false"
-            android:theme="@style/Theme.QuickNote" />
-
-        <activity
-            android:name=".ui.SettingsActivity"
             android:exported="false"
             android:theme="@style/Theme.QuickNote" />
 
@@ -56,6 +54,17 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="floating_note_overlay" />
+        </service>
+
+        <service
+            android:name=".tile.QuickTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_note"
+            android:label="@string/tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
         </service>
 
         <receiver

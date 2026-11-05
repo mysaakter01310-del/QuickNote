@@ -7,4 +7,5 @@
     <string name="cancel">Cancel</string>
     <string name="widget_label">QuickNote Capture</string>
     <string name="update">Update</string>
+    <string name="tile_label">Quick Note</string>
 </resources>

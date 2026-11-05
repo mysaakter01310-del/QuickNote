@@ -6,4 +6,15 @@
     android:layout_height="?attr/actionBarSize"
     android:background="@color/clipper_blue"
     android:theme="@style/ThemeOverlay.AppCompat.Dark.ActionBar"
-    app:navigationIcon="@drawable/ic_back" />
+    app:navigationIcon="@drawable/ic_back">
+
+    <ImageView
+        android:id="@+id/btnSaveTick"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="end"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:padding="12dp"
+        android:src="@drawable/ic_check"
+        app:tint="@android:color/white" />
+</androidx.appcompat.widget.Toolbar>
