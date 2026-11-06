@@ -7,10 +7,11 @@
         <item name="android:windowBackground">@color/background</item>
     </style>
 
-    <style name="Theme.QuickNote.Dialog" parent="Theme.MaterialComponents.DayNight.Dialog">
+    <style name="Theme.QuickNote.Dialog" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <item name="android:windowIsFloating">false</item>
         <item name="android:windowIsTranslucent">true</item>
-        <item name="android:windowNoTitle">true</item>
+        <item name="windowNoTitle">true</item>
+        <item name="windowActionBar">false</item>
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="colorPrimary">@color/clipper_blue</item>
         <item name="colorAccent">@color/clipper_blue</item>

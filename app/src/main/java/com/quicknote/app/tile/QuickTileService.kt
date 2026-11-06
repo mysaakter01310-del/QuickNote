@@ -12,7 +12,7 @@ class QuickTileService : TileService() {
 
     override fun onStartListening() {
         qsTile?.let {
-            it.state = Tile.STATE_INACTIVE
+            it.state = Tile.STATE_ACTIVE
             it.updateTile()
         }
     }
